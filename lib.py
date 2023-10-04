@@ -2,7 +2,7 @@ import numpy as np
 from tqdm import tqdm
 import jax
 import jax.numpy as jnp
-from functools import partial
+from functools import partial, wraps
 
 class Neuron():
     def __init__(self, n_synapses, n_dendrites, bias=0, seed=42) -> None:
@@ -14,9 +14,20 @@ class Neuron():
         self.w = jax.random.normal(subkey, (self.nd, self.ns))*1.0/jnp.sqrt(self.ns)
         self.latent_var = None
 
-    @partial(jax.jit, static_argnums=(0, ))
+    @wraps(partial(jax.jit, static_argnums=(0, )))
     def update_fun(self, w, x, latent_var=None):
         return w, latent_var
+    
+    @wraps(partial(jax.jit, static_argnums=(0, )))
+    def get_votes(self, w, x, latent_var=None):
+        "get votes/evidence to decide whether pattern x is familiar or unfamiliar"
+        x = jnp.atleast_2d(x)
+        f1 = lambda x: (w@x.T)[:, 0] # for 1d x
+        f2 = lambda x: jnp.sum(w*x, axis=-1) # for 2d x
+        # when input x is 1d, f1 runs faster than f2, because broadcast operation is not needed in f1. 
+        overlaps = jax.lax.cond((x.shape)[0]==1, f1, f2, x) # dim=(nd, )
+        votes = jnp.sum(jnp.heaviside(overlaps - self.b, 0.))
+        return votes
 
 class Neuron1(Neuron):
     """update rule is Δw = (β1*x - β2*w)/ns, ndR dendrites are updated each time, all inputs are the same"""
@@ -59,7 +70,7 @@ class Neuron3(Neuron):
         self.kappa = kappa
         self.ndR = ndR
 
-    @partial(jax.jit, static_argnums=(0, ))
+    @wraps(partial(jax.jit, static_argnums=(0, )))
     def update_fun(self, w, x, latent_var=None):
         x = jnp.atleast_2d(x)
         overlaps = jnp.sum(w*x, axis=-1) - self.b # dim = (nd, )
@@ -68,6 +79,25 @@ class Neuron3(Neuron):
         updated_w = updated_w/jnp.linalg.norm(updated_w, ord=2, axis=-1, keepdims=True)
         return w.at[updated_idx].set(updated_w), latent_var
        
+class Neuron3_2(Neuron3):
+    def __init__(self, n_synapses, n_dendrites, bias, kappa, ndR, n_votes, seed=42) -> None:
+        """n_votes is the number of dendrites that can contribute to the total votes/evidence that is used for familiarity detection"""
+        super().__init__(n_synapses, n_dendrites, bias, kappa, ndR, seed)
+        self.n_votes = n_votes
+
+    @wraps(partial(jax.jit, static_argnums=(0, )))
+    def get_votes(self, w, x, latent_var=None):
+        "get votes/evidence to decide whether pattern x is familiar or unfamiliar"
+        x = jnp.atleast_2d(x)
+        f1 = lambda x: (w@x.T)[:, 0] # for 1d x
+        f2 = lambda x: jnp.sum(w*x, axis=-1) # for 2d x
+        # when input x is 1d, f1 runs faster than f2, because broadcast operation is not needed in f1. 
+        overlaps = jax.lax.cond((x.shape)[0]==1, f1, f2, x) # dim=(nd, )
+        updated_overlap, updated_idx = jax.lax.top_k(overlaps, self.n_votes)
+        votes = jnp.sum(updated_overlap)
+        # votes = jnp.sum(overlaps)
+        return votes
+
 class Neuron4(Neuron):
     """update rule is Δw = x^{\perp} (b+k-w*x)/ns, update threshold is w*x > b-la."""
 
@@ -202,6 +232,7 @@ class Neuron8(Neuron):
         return w, latent_var
 
 class Neuron9(Neuron8):
+    """see note3BinaryInput.pdf for explanation"""
     def __init__(self, n_synapses, n_dendrites, bias, kappa, ndR, fA, w_len, beta1, beta2, beta3, beta4, seed=42) -> None:
         super().__init__(n_synapses, n_dendrites, bias, kappa, ndR, fA, w_len, beta1, beta2, seed)
         self.latent_var = jnp.zeros((self.nd, self.ns))
@@ -246,11 +277,48 @@ class Neuron9(Neuron8):
         gamma = jax.nn.softmax(tmp, axis=-1, where=1-xs, initial=1e-6)
         return gamma
 
+class Neuron10(Neuron):
+    """update rule is Δw = 1/ns [x (b+k-w*x) - beta w] , ndR dendrites are updated each time. """
+
+    def __init__(self, n_synapses, n_dendrites, bias, kappa, ndR, beta, seed=42) -> None:
+        super().__init__(n_synapses, n_dendrites, bias, seed)
+        self.kappa = kappa
+        self.ndR = ndR
+        self.beta = beta
+
+    @partial(jax.jit, static_argnums=(0, ))
+    def update_fun(self, w, x, latent_var=None):
+        x = jnp.atleast_2d(x)
+        overlaps = jnp.sum(w*x, axis=-1) - self.b # dim = (nd, )
+        updated_overlap, updated_idx = jax.lax.top_k(overlaps, self.ndR)
+        updated_w = w[updated_idx] + jnp.heaviside(self.kappa-updated_overlap, 0.).reshape((-1, 1))*(x[updated_idx]*(self.kappa-updated_overlap).reshape((-1, 1)) - self.beta*w[updated_idx])/self.ns # dim = (ndR, ns)
+        return w.at[updated_idx].set(updated_w), latent_var
+    
+class Neuron10_2(Neuron10):
+    """n_votes is the number of dendrites that can contribute to the total votes/evidence that is used for familiarity detection"""
+    def __init__(self, n_synapses, n_dendrites, bias, kappa, ndR, beta, n_votes, seed=42) -> None:
+        super().__init__(n_synapses, n_dendrites, bias, kappa, ndR, beta, seed)
+        self.n_votes = n_votes
+
+    @partial(jax.jit, static_argnums=(0, ))
+    def get_votes(self, w, x, latent_var=None):
+        "get votes/evidence to decide whether pattern x is familiar or unfamiliar"
+        x = jnp.atleast_2d(x)
+        f1 = lambda x: (w@x.T)[:, 0] # for 1d x
+        f2 = lambda x: jnp.sum(w*x, axis=-1) # for 2d x
+        # when input x is 1d, f1 runs faster than f2, because broadcast operation is not needed in f1. 
+        overlaps = jax.lax.cond((x.shape)[0]==1, f1, f2, x) # dim=(nd, )
+        updated_overlap, updated_idx = jax.lax.top_k(overlaps, self.n_votes)
+        votes = jnp.sum(updated_overlap)
+        # votes = jnp.sum(overlaps)
+        return votes
+
+
 class Xs_Generator():
     def __init__(self, seed=0, *args, **kwargs) -> None:
         self.key = jax.random.PRNGKey(seed)
 
-    @partial(jax.jit, static_argnums=(0, 2))
+    @wraps(partial(jax.jit, static_argnums=(0, 2)))
     def gen(self, key, size) -> jnp.ndarray:
         return jnp.zeros(size)
 
@@ -260,7 +328,7 @@ class Xs_Generator1(Xs_Generator):
         super().__init__(seed, *args, **kwargs)
         self.normalized_len = normalized_len
 
-    @partial(jax.jit, static_argnums=(0, 2))
+    @wraps(partial(jax.jit, static_argnums=(0, 2)))
     def gen(self, key, size) -> jnp.ndarray:
         "the last dimension should have length ns, i.e., size[-1]=ns"
         xs = jax.random.normal(key, size)
@@ -278,7 +346,7 @@ class Xs_Generator2(Xs_Generator):
         self.fAns = jnp.round(self.fA*self.ns).astype(jnp.int32)
         self.normalizedQ = normalizedQ
 
-    @partial(jax.jit, static_argnums=(0, 2))
+    @wraps(partial(jax.jit, static_argnums=(0, 2)))
     def gen(self, key, size) -> np.ndarray:
         "the last dimension should have length ns, i.e., size[-1]=ns"
         def fun1(key):
@@ -294,35 +362,49 @@ class Xs_Generator2(Xs_Generator):
 
 class Simulation_Run():
     """for identical inputs only"""
-    def __init__(self, neuron: Neuron, xs_gen: Xs_Generator, decay_steps=500, initial_steps=500, n_tested_patterns=100, seed=42) -> None:
+    def __init__(self, neuron: Neuron, xs_gen: Xs_Generator, decay_steps=500, initial_steps=500, n_tested_patterns=100, refresh_every=1000, seed=42) -> None:
         self.key = jax.random.PRNGKey(seed)
         self.key, subkey1, subkey2 = jax.random.split(self.key, 3)
         self.neuron = neuron
         self.decay_steps = decay_steps
         self.initial_steps = initial_steps
         self.n_test_patterns = n_tested_patterns
+        self.refresh_every = max(refresh_every, n_tested_patterns)
         self.xs_gen = xs_gen
-        self.xs = self.xs_gen.gen(subkey1, (decay_steps+n_tested_patterns, neuron.ns))
+        self.xs = self.xs_gen.gen(subkey1, (self.refresh_every, neuron.ns))
+        # self.xs = self.xs_gen.gen(subkey1, (decay_steps+n_tested_patterns, neuron.ns))
         self.init_w(subkey2)
 
         self.votes_record = np.zeros((n_tested_patterns, decay_steps+n_tested_patterns))
 
     def init_w(self, key):
-        xs0 = self.xs_gen.gen(key, (self.initial_steps, self.neuron.ns))
+        # xs0 = self.xs_gen.gen(key, (self.initial_steps, self.neuron.ns))
+        # for i  in range(self.initial_steps):
+        #     self.neuron.w, self.neuron.latent_var = self.neuron.update_fun(self.neuron.w, xs0[i], self.neuron.latent_var)
+        
         for i  in range(self.initial_steps):
-            self.neuron.w, self.neuron.latent_var = self.neuron.update_fun(self.neuron.w, xs0[i], self.neuron.latent_var)
+            if i%self.refresh_every == 0:
+                xs0 = self.xs_gen.gen(key, (self.refresh_every, self.neuron.ns))
+            self.neuron.w, self.neuron.latent_var = self.neuron.update_fun(self.neuron.w, xs0[i%self.refresh_every], self.neuron.latent_var)
 
     @partial(jax.jit, static_argnums=(0, ))
     def _update_and_get_votes(self, w, latent_var, x, x0s):
         w, latent_var = self.neuron.update_fun(w, x, latent_var)
-        overlaps = w @ x0s.T # dim=(nd, n_tested_patterns)
-        votes = jnp.sum(jnp.heaviside(overlaps - self.neuron.b, 0.), axis=0) # dim=(n_tested_patterns, )
+        votes = jax.vmap(self.neuron.get_votes, in_axes=(None, 0))(w, x0s) # dim=(n_tested_patterns, )
         return w, latent_var, votes
 
     def run(self):
-        x0s = self.xs[:self.n_test_patterns]
+        # x0s = self.xs[:self.n_test_patterns]
+        # for i in tqdm(range(self.decay_steps+self.n_test_patterns)):
+        #     self.neuron.w, self.neuron.latent_var, votes = self._update_and_get_votes(self.neuron.w, self.neuron.latent_var, self.xs[i], x0s)
+        #     self.votes_record[:, i] = votes
+        
+        x0s = self.xs[:self.n_test_patterns] # in jax numpy, a copy is created for x0s
         for i in tqdm(range(self.decay_steps+self.n_test_patterns)):
-            self.neuron.w, self.neuron.latent_var, votes = self._update_and_get_votes(self.neuron.w, self.neuron.latent_var, self.xs[i], x0s)
+            if i%self.refresh_every == 0 and i>=self.refresh_every:
+                self.key, subkey = jax.random.split(self.key)
+                self.xs = self.xs_gen.gen(subkey, (self.refresh_every, self.neuron.ns))
+            self.neuron.w, self.neuron.latent_var, votes = self._update_and_get_votes(self.neuron.w, self.neuron.latent_var, self.xs[i%self.refresh_every], x0s)
             self.votes_record[:, i] = votes
         
         for i in range(self.n_test_patterns):
@@ -353,8 +435,7 @@ class Simulation_Run2():
     @partial(jax.jit, static_argnums=(0, ))
     def _update_and_get_votes(self, w, latent_var, x, x0s):
         w, latent_var = self.neuron.update_fun(w, x, latent_var)
-        overlaps = jnp.einsum("ijk,jk->ij", x0s, w, optimize="optimal") # dim=(n_tested_patterns, nd)
-        votes = jnp.sum(jnp.heaviside(overlaps - self.neuron.b, 0.), axis=-1) # dim=(n_tested_patterns, )
+        votes = jax.vmap(self.neuron.get_votes, in_axes=(None, 0))(w, x0s) # dim=(n_tested_patterns, )
         return w, latent_var, votes
     
     def run(self):
