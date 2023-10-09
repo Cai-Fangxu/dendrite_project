@@ -80,10 +80,11 @@ class Neuron3(Neuron):
         return w.at[updated_idx].set(updated_w), latent_var
        
 class Neuron3_2(Neuron3):
-    def __init__(self, n_synapses, n_dendrites, bias, kappa, ndR, n_votes, seed=42) -> None:
+    def __init__(self, n_synapses, n_dendrites, bias, kappa, ndR, n_votes, vote_th, seed=42) -> None:
         """n_votes is the number of dendrites that can contribute to the total votes/evidence that is used for familiarity detection"""
         super().__init__(n_synapses, n_dendrites, bias, kappa, ndR, seed)
         self.n_votes = n_votes
+        self.vote_th = vote_th
 
     @wraps(partial(jax.jit, static_argnums=(0, )))
     def get_votes(self, w, x, latent_var=None):
@@ -93,8 +94,9 @@ class Neuron3_2(Neuron3):
         f2 = lambda x: jnp.sum(w*x, axis=-1) # for 2d x
         # when input x is 1d, f1 runs faster than f2, because broadcast operation is not needed in f1. 
         overlaps = jax.lax.cond((x.shape)[0]==1, f1, f2, x) # dim=(nd, )
-        updated_overlap, updated_idx = jax.lax.top_k(overlaps, self.n_votes)
-        votes = jnp.sum(updated_overlap)
+        high_overlaps, updated_idx = jax.lax.top_k(overlaps, self.n_votes)
+        high_overlaps = jax.nn.relu(high_overlaps-self.vote_th)
+        votes = jnp.sum(high_overlaps)
         # votes = jnp.sum(overlaps)
         return votes
 
@@ -110,10 +112,32 @@ class Neuron4(Neuron):
     def update_fun(self, w, x, latent_var=None):
         x = jnp.atleast_2d(x)
         overlaps = jnp.sum(w*x, axis=-1) - self.b # dim = (nd, )
-        mask = np.heaviside(self.kappa-overlaps, 0)*np.heaviside(overlaps+self.la, 0.) # dim = (nd, )
+        mask = jnp.heaviside(self.kappa-overlaps, 0)*jnp.heaviside(overlaps+self.la, 0.) # dim = (nd, )
         w = w + (mask*(self.kappa-overlaps)).reshape((-1, 1))*x/self.ns # dim = (nd, ns)
         w = w/jnp.linalg.norm(w, ord=2, axis=-1, keepdims=True)
         return w, latent_var
+
+class Neuron4_2(Neuron4):
+    def __init__(self, n_synapses, n_dendrites, bias, kappa, la, n_votes, vote_th, seed=42) -> None:
+        """n_votes is the number of dendrites that can contribute to the total votes/evidence that is used for familiarity detection. 
+        A dendrite can contribute to the vote/evidence only when the overlap between its input and weight is larger than vote_th"""
+        super().__init__(n_synapses, n_dendrites, bias, kappa, la, seed)
+        self.n_votes = n_votes
+        self.vote_th = vote_th
+
+    @wraps(partial(jax.jit, static_argnums=(0, )))
+    def get_votes(self, w, x, latent_var=None):
+        "get votes/evidence to decide whether pattern x is familiar or unfamiliar"
+        x = jnp.atleast_2d(x)
+        f1 = lambda x: (w@x.T)[:, 0] # for 1d x
+        f2 = lambda x: jnp.sum(w*x, axis=-1) # for 2d x
+        # when input x is 1d, f1 runs faster than f2, because broadcast operation is not needed in f1. 
+        overlaps = jax.lax.cond((x.shape)[0]==1, f1, f2, x) # dim=(nd, )
+        high_overlaps, high_overlap_idx = jax.lax.top_k(overlaps, self.n_votes)
+        high_overlaps = jax.nn.relu(high_overlaps-self.vote_th)
+        votes = jnp.sum(high_overlaps)
+        # votes = jnp.sum(overlaps)
+        return votes
 
 class Neuron5(Neuron):
     """update rule is Δw = x^{\perp} (b+k-w*x)/ns, ndR dendrites are updated each time. All inputs are the same. Age-ordered weight modification: for each dendrite, there is a latent vector that stores the time-averaged inputs that cause a weight change to the dendrite. If the angle between current input and this vector is larger than 90 degrees, the weight update is modified to be perpendicular to this vector"""
@@ -315,23 +339,24 @@ class Neuron10_2(Neuron10):
 
 
 class Xs_Generator():
-    def __init__(self, seed=0, *args, **kwargs) -> None:
+    def __init__(self, nd, ns, seed=0, *args, **kwargs) -> None:
         self.key = jax.random.PRNGKey(seed)
+        self.ns = ns
+        self.nd = nd
 
     @wraps(partial(jax.jit, static_argnums=(0, 2)))
-    def gen(self, key, size) -> jnp.ndarray:
-        return jnp.zeros(size)
+    def gen(self, key, n_patterns) -> jnp.ndarray:
+        return jnp.zeros((n_patterns, self.nd, self.ns))
 
 class Xs_Generator1(Xs_Generator):
     "generate input patterns from normal distribution"
-    def __init__(self, normalized_len, seed=0, *args, **kwargs) -> None:
-        super().__init__(seed, *args, **kwargs)
+    def __init__(self, nd, ns, normalized_len, seed=0, *args, **kwargs) -> None:
+        super().__init__(nd, ns, seed, *args, **kwargs)
         self.normalized_len = normalized_len
 
     @wraps(partial(jax.jit, static_argnums=(0, 2)))
-    def gen(self, key, size) -> jnp.ndarray:
-        "the last dimension should have length ns, i.e., size[-1]=ns"
-        xs = jax.random.normal(key, size)
+    def gen(self, key, n_patterns) -> jnp.ndarray:
+        xs = jax.random.normal(key, (n_patterns, self.nd, self.ns))
         def normalize_fun(xs):
             return xs/jnp.linalg.norm(xs, ord=2, axis=-1, keepdims=True)*self.normalized_len
         xs = jax.lax.cond(self.normalized_len>0, normalize_fun, lambda x: x, xs)
@@ -339,26 +364,105 @@ class Xs_Generator1(Xs_Generator):
     
 class Xs_Generator2(Xs_Generator):
     "generate binary inputs"
-    def __init__(self, fA, ns, normalizedQ=True, seed=0, *args, **kwargs) -> None:
-        super().__init__(seed, *args, **kwargs)
+    def __init__(self, nd, ns, fA, normalizedQ=True, seed=0, *args, **kwargs) -> None:
+        super().__init__(nd, ns, seed, *args, **kwargs)
         self.fA = fA
-        self.ns = ns
         self.fAns = jnp.round(self.fA*self.ns).astype(jnp.int32)
         self.normalizedQ = normalizedQ
 
     @wraps(partial(jax.jit, static_argnums=(0, 2)))
-    def gen(self, key, size) -> np.ndarray:
-        "the last dimension should have length ns, i.e., size[-1]=ns"
+    def gen(self, key, n_patterns) -> jnp.ndarray:
         def fun1(key):
-            xs = jnp.zeros(size)
+            xs = jnp.zeros((n_patterns, self.nd, self.ns))
             xs = xs.at[..., :self.fAns].set(1)
             return jax.random.permutation(key, xs, axis=-1, independent=True)
         def fun2(key):
-            xs = jax.random.choice(key, jnp.array([0., 1.]), shape=size, p=jnp.array([1-self.fA, self.fA]))
+            xs = jax.random.choice(key, jnp.array([0., 1.]), shape=(n_patterns, self.nd, self.ns), p=jnp.array([1-self.fA, self.fA]))
             return xs
         
         xs = jax.lax.cond(self.normalizedQ, fun1, fun2, key)
         return xs
+    
+
+class Xs_Generator3(Xs_Generator):
+    def __init__(self, nd, ns, rho, normalized_len, seed=0, *args, **kwargs) -> None:
+        """Generate input patterns with some fixed axon-dendrite connectivity structure. 
+        rho is the redundency factor, groups of rho synapses receive the same input, rho <= nd"""
+        super().__init__(nd, ns, seed, *args, **kwargs)
+        self.normalized_len = normalized_len
+        self.rho = rho # 1 <= rho <= nd
+        self.nA = jnp.ceil(ns*nd/rho).astype(int) # number of input axons, ns <= nA <= ns*nd
+        self.key, subkey = jax.random.split(self.key)
+        self.conn_idx_mat = self._get_connectivity_idx_mat(subkey) # dim = (nd, ns)
+
+    def _get_connectivity_idx_mat(self, key) -> jnp.ndarray:
+        pass
+
+    @wraps(partial(jax.jit, static_argnums=(0, 2)))
+    def gen(self, key, n_patterns) -> jnp.ndarray:
+        axons_input = jax.random.normal(key, (n_patterns, self.nA)) # dim = (n_patterns, nA)
+        xs = axons_input[:, self.conn_idx_mat] # dim = (n_patterns, nd, ns)
+        def normalize_fun(xs):
+            return xs/jnp.linalg.norm(xs, ord=2, axis=-1, keepdims=True)*self.normalized_len
+        xs = jax.lax.cond(self.normalized_len>0, normalize_fun, lambda x: x, xs)
+        return xs
+
+class Xs_Generator3_1(Xs_Generator3):
+    """axons make connections randomly"""
+    def _get_connectivity_idx_mat(self, key) -> jnp.ndarray:
+        conn_mat = jnp.repeat(jnp.arange(self.nA), repeats=self.rho) # dim = (nA*rho, )
+        conn_mat = jax.random.permutation(key, conn_mat)[:self.ns*self.nd].reshape((self.nd, self.ns)) # dim = (nd, ns)
+        return conn_mat
+    
+class Xs_Generator3_2(Xs_Generator3):
+    """each axon only makes one connection with each dendrite"""
+    def _get_connectivity_idx_mat(self, key) -> jnp.ndarray:
+        key_list = jax.random.split(key, self.nd)
+        fun = lambda key: jax.random.choice(key, jnp.arange(self.nA), (self.ns, ), replace=False)
+        conn_mat = jax.vmap(fun, in_axes=0)(key_list) # dim = (nd, ns)
+        return conn_mat
+
+# class Xs_Generator3(Xs_Generator):
+#     """Only use it for the different input case. Generate input patterns from normal distribution, with correlation. """
+#     def __init__(self, normalized_len, rho, seed=0, *args, **kwargs) -> None:
+#         "rho is redundency factor, groups of rho synapses receive the same input"
+#         super().__init__(seed, *args, **kwargs)
+#         self.normalized_len = normalized_len
+#         self.rho = rho
+
+#     @wraps(partial(jax.jit, static_argnums=(0, 2)))
+#     def gen(self, key, size) -> jnp.ndarray:
+#         """the dimension of size should be (..., nd, ns)"""
+#         key1, key2 = jax.random.split(key)
+#         input_len = size[-1]*size[-2]
+#         n_groups = jnp.ceil(input_len/self.rho).astype(int)
+#         xs_independent = jax.random.normal(key1, size[:-2]+(n_groups, )) # dim = (..., n_groups)
+#         xs = jnp.broadcast_to(xs_independent, (self.rho, ) + xs_independent.shape) # dim = (rho, ..., n_groups)
+#         tmp_xs_n_dim = len(xs.shape)
+#         xs = jnp.transpose(xs, jnp.roll(jnp.arange(tmp_xs_n_dim), -1)) # dim = (..., n_groups, rho)
+#         xs = xs.reshape(xs_independent.shape[:-1]+(-1, )) # dim = (..., n_groups*rho)
+#         xs = jax.random.permutation(key2, xs, axis=-1, independent=True)[..., :input_len] # dim = (..., ns*nd)
+#         xs = xs.reshape(size) # dim = (..., nd, ns)
+
+#         def normalize_fun(xs):
+#             return xs/jnp.linalg.norm(xs, ord=2, axis=-1, keepdims=True)*self.normalized_len
+#         xs = jax.lax.cond(self.normalized_len>0, normalize_fun, lambda x: x, xs)
+#         return xs
+    
+# class Xs_Generator4(Xs_Generator):
+#     def __init__(self, normalized_len, nA, seed=0, *args, **kwargs) -> None:
+#         "rho is redundency factor, groups of rho synapses receive the same input"
+#         super().__init__(seed, *args, **kwargs)
+#         self.normalized_len = normalized_len
+#         self.nA = nA
+    
+#     @wraps(partial(jax.jit, static_argnums=(0, 2)))
+#     def gen(self, key, size) -> jnp.ndarray:
+#         key1, subkey = jax.random.split(key)
+#         subkeys = jax.random.split(subkey)
+#         x_As = jax.random.normal(key1, self.nA)
+        
+    
 
 class Simulation_Run():
     """for identical inputs only"""
@@ -371,7 +475,7 @@ class Simulation_Run():
         self.n_test_patterns = n_tested_patterns
         self.refresh_every = max(refresh_every, n_tested_patterns)
         self.xs_gen = xs_gen
-        self.xs = self.xs_gen.gen(subkey1, (self.refresh_every, neuron.ns))
+        self.xs = self.xs_gen.gen(subkey1, self.refresh_every).reshape((self.refresh_every, self.neuron.ns))
         # self.xs = self.xs_gen.gen(subkey1, (decay_steps+n_tested_patterns, neuron.ns))
         self.init_w(subkey2)
 
@@ -384,7 +488,7 @@ class Simulation_Run():
         
         for i  in range(self.initial_steps):
             if i%self.refresh_every == 0:
-                xs0 = self.xs_gen.gen(key, (self.refresh_every, self.neuron.ns))
+                xs0 = self.xs_gen.gen(key, self.refresh_every).reshape((self.refresh_every, self.neuron.ns))
             self.neuron.w, self.neuron.latent_var = self.neuron.update_fun(self.neuron.w, xs0[i%self.refresh_every], self.neuron.latent_var)
 
     @partial(jax.jit, static_argnums=(0, ))
@@ -403,12 +507,12 @@ class Simulation_Run():
         for i in tqdm(range(self.decay_steps+self.n_test_patterns)):
             if i%self.refresh_every == 0 and i>=self.refresh_every:
                 self.key, subkey = jax.random.split(self.key)
-                self.xs = self.xs_gen.gen(subkey, (self.refresh_every, self.neuron.ns))
+                self.xs = self.xs_gen.gen(subkey, self.refresh_every).reshape((self.refresh_every, self.neuron.ns))
             self.neuron.w, self.neuron.latent_var, votes = self._update_and_get_votes(self.neuron.w, self.neuron.latent_var, self.xs[i%self.refresh_every], x0s)
-            self.votes_record[:, i] = votes
+            self.votes_record[..., i] = votes
         
         for i in range(self.n_test_patterns):
-            self.votes_record[i] = np.roll(self.votes_record[i], -i)
+            self.votes_record[i] = np.roll(self.votes_record[i], -i, axis=-1)
 
 class Simulation_Run2():
     """for the case where inputs are different"""
@@ -421,7 +525,7 @@ class Simulation_Run2():
         self.n_test_patterns = n_tested_patterns
         self.refresh_every = max(refresh_every, n_tested_patterns)
         self.xs_gen = xs_gen
-        self.xs = self.xs_gen.gen(subkey1, (self.refresh_every, neuron.nd, neuron.ns))
+        self.xs = self.xs_gen.gen(subkey1, self.refresh_every)
         self.init_w(subkey2)
 
         self.votes_record = np.zeros((n_tested_patterns, decay_steps+n_tested_patterns))
@@ -429,7 +533,7 @@ class Simulation_Run2():
     def init_w(self, key):
         for i  in range(self.initial_steps):
             if i%self.refresh_every == 0:
-                xs0 = self.xs_gen.gen(key, (self.refresh_every, self.neuron.nd, self.neuron.ns))
+                xs0 = self.xs_gen.gen(key, self.refresh_every)
             self.neuron.w, self.neuron.latent_var = self.neuron.update_fun(self.neuron.w, xs0[i%self.refresh_every], self.neuron.latent_var)
 
     @partial(jax.jit, static_argnums=(0, ))
@@ -444,9 +548,13 @@ class Simulation_Run2():
         for i in tqdm(range(self.decay_steps+self.n_test_patterns)):
             if i%self.refresh_every == 0 and i>=self.refresh_every:
                 self.key, subkey = jax.random.split(self.key)
-                self.xs = self.xs_gen.gen(subkey, (self.refresh_every, self.neuron.nd, self.neuron.ns))
+                self.xs = self.xs_gen.gen(subkey, self.refresh_every)
             self.neuron.w, self.neuron.latent_var, votes = self._update_and_get_votes(self.neuron.w, self.neuron.latent_var, self.xs[i%self.refresh_every], x0s)
-            self.votes_record[:, i] = votes
+            self.votes_record[..., i] = votes
         
         for i in range(self.n_test_patterns):
-            self.votes_record[i] = np.roll(self.votes_record[i], -i)
+            self.votes_record[i] = np.roll(self.votes_record[i], -i, axis=-1)
+
+
+def test_fun(x):
+    return x+20
