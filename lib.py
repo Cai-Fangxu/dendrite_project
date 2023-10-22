@@ -94,7 +94,8 @@ class Neuron3_2(Neuron3):
         f2 = lambda x: jnp.sum(w*x, axis=-1) # for 2d x
         # when input x is 1d, f1 runs faster than f2, because broadcast operation is not needed in f1. 
         overlaps = jax.lax.cond((x.shape)[0]==1, f1, f2, x) # dim=(nd, )
-        high_overlaps, updated_idx = jax.lax.top_k(overlaps, self.n_votes)
+        # high_overlaps, updated_idx = jax.lax.top_k(overlaps, self.n_votes)
+        high_overlaps = overlaps
         high_overlaps = jax.nn.relu(high_overlaps-self.vote_th)
         votes = jnp.sum(high_overlaps)
         # votes = jnp.sum(overlaps)
@@ -349,7 +350,8 @@ class Xs_Generator():
         return jnp.zeros((n_patterns, self.nd, self.ns))
 
 class Xs_Generator1(Xs_Generator):
-    "generate input patterns from normal distribution"
+    """generate input patterns from normal distribution. 
+    For the same input case, set nd=1"""
     def __init__(self, nd, ns, normalized_len, seed=0, *args, **kwargs) -> None:
         super().__init__(nd, ns, seed, *args, **kwargs)
         self.normalized_len = normalized_len
@@ -421,33 +423,6 @@ class Xs_Generator3_2(Xs_Generator3):
         fun = lambda key: jax.random.choice(key, jnp.arange(self.nA), (self.ns, ), replace=False)
         conn_mat = jax.vmap(fun, in_axes=0)(key_list) # dim = (nd, ns)
         return conn_mat
-
-# class Xs_Generator3(Xs_Generator):
-#     """Only use it for the different input case. Generate input patterns from normal distribution, with correlation. """
-#     def __init__(self, normalized_len, rho, seed=0, *args, **kwargs) -> None:
-#         "rho is redundency factor, groups of rho synapses receive the same input"
-#         super().__init__(seed, *args, **kwargs)
-#         self.normalized_len = normalized_len
-#         self.rho = rho
-
-#     @wraps(partial(jax.jit, static_argnums=(0, 2)))
-#     def gen(self, key, size) -> jnp.ndarray:
-#         """the dimension of size should be (..., nd, ns)"""
-#         key1, key2 = jax.random.split(key)
-#         input_len = size[-1]*size[-2]
-#         n_groups = jnp.ceil(input_len/self.rho).astype(int)
-#         xs_independent = jax.random.normal(key1, size[:-2]+(n_groups, )) # dim = (..., n_groups)
-#         xs = jnp.broadcast_to(xs_independent, (self.rho, ) + xs_independent.shape) # dim = (rho, ..., n_groups)
-#         tmp_xs_n_dim = len(xs.shape)
-#         xs = jnp.transpose(xs, jnp.roll(jnp.arange(tmp_xs_n_dim), -1)) # dim = (..., n_groups, rho)
-#         xs = xs.reshape(xs_independent.shape[:-1]+(-1, )) # dim = (..., n_groups*rho)
-#         xs = jax.random.permutation(key2, xs, axis=-1, independent=True)[..., :input_len] # dim = (..., ns*nd)
-#         xs = xs.reshape(size) # dim = (..., nd, ns)
-
-#         def normalize_fun(xs):
-#             return xs/jnp.linalg.norm(xs, ord=2, axis=-1, keepdims=True)*self.normalized_len
-#         xs = jax.lax.cond(self.normalized_len>0, normalize_fun, lambda x: x, xs)
-#         return xs
     
 # class Xs_Generator4(Xs_Generator):
 #     def __init__(self, normalized_len, nA, seed=0, *args, **kwargs) -> None:
@@ -465,57 +440,6 @@ class Xs_Generator3_2(Xs_Generator3):
     
 
 class Simulation_Run():
-    """for identical inputs only"""
-    def __init__(self, neuron: Neuron, xs_gen: Xs_Generator, decay_steps=500, initial_steps=500, n_tested_patterns=100, refresh_every=1000, seed=42) -> None:
-        self.key = jax.random.PRNGKey(seed)
-        self.key, subkey1, subkey2 = jax.random.split(self.key, 3)
-        self.neuron = neuron
-        self.decay_steps = decay_steps
-        self.initial_steps = initial_steps
-        self.n_test_patterns = n_tested_patterns
-        self.refresh_every = max(refresh_every, n_tested_patterns)
-        self.xs_gen = xs_gen
-        self.xs = self.xs_gen.gen(subkey1, self.refresh_every).reshape((self.refresh_every, self.neuron.ns))
-        # self.xs = self.xs_gen.gen(subkey1, (decay_steps+n_tested_patterns, neuron.ns))
-        self.init_w(subkey2)
-
-        self.votes_record = np.zeros((n_tested_patterns, decay_steps+n_tested_patterns))
-
-    def init_w(self, key):
-        # xs0 = self.xs_gen.gen(key, (self.initial_steps, self.neuron.ns))
-        # for i  in range(self.initial_steps):
-        #     self.neuron.w, self.neuron.latent_var = self.neuron.update_fun(self.neuron.w, xs0[i], self.neuron.latent_var)
-        
-        for i  in range(self.initial_steps):
-            if i%self.refresh_every == 0:
-                xs0 = self.xs_gen.gen(key, self.refresh_every).reshape((self.refresh_every, self.neuron.ns))
-            self.neuron.w, self.neuron.latent_var = self.neuron.update_fun(self.neuron.w, xs0[i%self.refresh_every], self.neuron.latent_var)
-
-    @partial(jax.jit, static_argnums=(0, ))
-    def _update_and_get_votes(self, w, latent_var, x, x0s):
-        w, latent_var = self.neuron.update_fun(w, x, latent_var)
-        votes = jax.vmap(self.neuron.get_votes, in_axes=(None, 0))(w, x0s) # dim=(n_tested_patterns, )
-        return w, latent_var, votes
-
-    def run(self):
-        # x0s = self.xs[:self.n_test_patterns]
-        # for i in tqdm(range(self.decay_steps+self.n_test_patterns)):
-        #     self.neuron.w, self.neuron.latent_var, votes = self._update_and_get_votes(self.neuron.w, self.neuron.latent_var, self.xs[i], x0s)
-        #     self.votes_record[:, i] = votes
-        
-        x0s = self.xs[:self.n_test_patterns] # in jax numpy, a copy is created for x0s
-        for i in tqdm(range(self.decay_steps+self.n_test_patterns)):
-            if i%self.refresh_every == 0 and i>=self.refresh_every:
-                self.key, subkey = jax.random.split(self.key)
-                self.xs = self.xs_gen.gen(subkey, self.refresh_every).reshape((self.refresh_every, self.neuron.ns))
-            self.neuron.w, self.neuron.latent_var, votes = self._update_and_get_votes(self.neuron.w, self.neuron.latent_var, self.xs[i%self.refresh_every], x0s)
-            self.votes_record[..., i] = votes
-        
-        for i in range(self.n_test_patterns):
-            self.votes_record[i] = np.roll(self.votes_record[i], -i, axis=-1)
-
-class Simulation_Run2():
-    """for the case where inputs are different"""
     def __init__(self, neuron: Neuron, xs_gen: Xs_Generator, decay_steps=500, initial_steps=500, n_tested_patterns=100, refresh_every=1000, seed=42) -> None:
         self.key = jax.random.PRNGKey(seed)
         self.key, subkey1, subkey2 = jax.random.split(self.key, 3)
@@ -530,22 +454,29 @@ class Simulation_Run2():
 
         self.votes_record = np.zeros((n_tested_patterns, decay_steps+n_tested_patterns))
 
+    @partial(jax.jit, static_argnums=(0, ))
+    def neuron_update_fun(self, w, x, latent_var):
+        return self.neuron.update_fun(w, x, latent_var)
+
     def init_w(self, key):
         for i  in range(self.initial_steps):
             if i%self.refresh_every == 0:
                 xs0 = self.xs_gen.gen(key, self.refresh_every)
-            self.neuron.w, self.neuron.latent_var = self.neuron.update_fun(self.neuron.w, xs0[i%self.refresh_every], self.neuron.latent_var)
+            self.neuron.w, self.neuron.latent_var = self.neuron_update_fun(self.neuron.w, xs0[i%self.refresh_every], self.neuron.latent_var)
 
     @partial(jax.jit, static_argnums=(0, ))
     def _update_and_get_votes(self, w, latent_var, x, x0s):
-        w, latent_var = self.neuron.update_fun(w, x, latent_var)
+        w, latent_var = self.neuron_update_fun(w, x, latent_var)
         votes = jax.vmap(self.neuron.get_votes, in_axes=(None, 0))(w, x0s) # dim=(n_tested_patterns, )
         return w, latent_var, votes
-    
-    def run(self):
-        # x0s = jnp.copy(self.xs[:self.n_test_patterns])
+
+    def run(self, progress_bar=True):        
         x0s = self.xs[:self.n_test_patterns] # in jax numpy, a copy is created for x0s
-        for i in tqdm(range(self.decay_steps+self.n_test_patterns)):
+        if progress_bar is True: 
+            pb = tqdm(range(self.decay_steps+self.n_test_patterns))
+        else:
+            pb = range(self.decay_steps+self.n_test_patterns)
+        for i in pb:
             if i%self.refresh_every == 0 and i>=self.refresh_every:
                 self.key, subkey = jax.random.split(self.key)
                 self.xs = self.xs_gen.gen(subkey, self.refresh_every)
@@ -555,6 +486,51 @@ class Simulation_Run2():
         for i in range(self.n_test_patterns):
             self.votes_record[i] = np.roll(self.votes_record[i], -i, axis=-1)
 
+# class Simulation_Run2():
+#     def __init__(self, neuron: Neuron, xs_gen: Xs_Generator, decay_steps=500, initial_steps=500, n_tested_patterns=100, refresh_every=1000, seed=42) -> None:
+#         self.key = jax.random.PRNGKey(seed)
+#         self.key, subkey1, subkey2 = jax.random.split(self.key, 3)
+#         self.neuron = neuron
+#         self.decay_steps = decay_steps
+#         self.initial_steps = initial_steps
+#         self.n_test_patterns = n_tested_patterns
+#         self.refresh_every = max(refresh_every, n_tested_patterns)
+#         self.xs_gen = xs_gen
+#         self.xs = self.xs_gen.gen(subkey1, self.refresh_every)
+#         self.init_w(subkey2)
 
-def test_fun(x):
-    return x+20
+#         self.votes_record = np.zeros((n_tested_patterns, decay_steps+n_tested_patterns))
+
+#     @partial(jax.jit, static_argnums=(0, ))
+#     def neuron_update_fun(self, w, x, latent_var):
+#         return self.neuron.update_fun(w, x, latent_var)
+
+#     def init_w(self, key):
+#         for i  in range(self.initial_steps):
+#             if i%self.refresh_every == 0:
+#                 xs0 = self.xs_gen.gen(key, self.refresh_every)
+#             self.neuron.w, self.neuron.latent_var = self.neuron_update_fun(self.neuron.w, xs0[i%self.refresh_every], self.neuron.latent_var)
+
+#     @partial(jax.jit, static_argnums=(0, ))
+#     def _update_and_get_votes(self, w, latent_var, x, x0s):
+#         w, latent_var = self.neuron_update_fun(w, x, latent_var)
+#         votes = jax.vmap(self.neuron.get_votes, in_axes=(None, 0))(w, x0s) # dim=(n_tested_patterns, )
+#         return w, latent_var, votes
+    
+#     def run(self, progress_bar=True):
+#         # x0s = jnp.copy(self.xs[:self.n_test_patterns])
+#         x0s = self.xs[:self.n_test_patterns] # in jax numpy, a copy is created for x0s
+#         if progress_bar is True: 
+#             pb = tqdm(range(self.decay_steps+self.n_test_patterns))
+#         else:
+#             pb = range(self.decay_steps+self.n_test_patterns)
+#         for i in pb:
+#             if i%self.refresh_every == 0 and i>=self.refresh_every:
+#                 self.key, subkey = jax.random.split(self.key)
+#                 self.xs = self.xs_gen.gen(subkey, self.refresh_every)
+#             self.neuron.w, self.neuron.latent_var, votes = self._update_and_get_votes(self.neuron.w, self.neuron.latent_var, self.xs[i%self.refresh_every], x0s)
+#             self.votes_record[..., i] = votes
+        
+#         for i in range(self.n_test_patterns):
+#             self.votes_record[i] = np.roll(self.votes_record[i], -i, axis=-1)
+
