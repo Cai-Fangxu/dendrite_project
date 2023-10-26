@@ -13,14 +13,17 @@ nd=200
 rho = 1
 bias = float(sys.argv[1])
 kappa = float(sys.argv[2])
-ndR = int(sys.argv[3])
+ndR = int(float(sys.argv[3]))
 n_votes = None
 vote_th = bias
+neuron_choice = sys.argv[4]
+try: 
+    beta = float(sys.argv[5])
+except:
+    beta = -1
 
-if len(sys.argv) == 4:
-    seed = 42
-else: 
-    seed = int(sys.argv[4])
+
+seed = int(sys.argv[-1])
 rng = np.random.default_rng(seed)
 
 # ndb = 1.
@@ -32,7 +35,12 @@ decay_steps = 30000
 n_tested_patterns = 500
 initial_steps = 5000
 
-neuron2 = lib.Neuron3_2(n_synapses=ns, n_dendrites=nd, bias=bias, kappa=kappa, ndR=ndR, n_votes=n_votes, vote_th=vote_th, seed=rng.integers(100000))
+if neuron_choice == "3_2":
+    neuron2 = lib.Neuron3_2(n_synapses=ns, n_dendrites=nd, bias=bias, kappa=kappa, ndR=ndR, n_votes=n_votes, vote_th=vote_th, seed=rng.integers(100000))
+elif neuron_choice == "10_2":
+    neuron2 = lib.Neuron10_2(n_synapses=ns, n_dendrites=nd, bias=bias, kappa=kappa, ndR=ndR, beta=beta, vote_th=vote_th, seed=rng.integers(100000))
+else: 
+    neuron2 = lib.Neuron10_2_2(n_synapses=ns, n_dendrites=nd, bias=bias, kappa=kappa, ndR=ndR, beta=beta, vote_th=vote_th, seed=rng.integers(100000))
 
 xs_gen = lib.Xs_Generator1(nd, ns, normalized_len=np.sqrt(ns), seed=rng.integers(100000))
 # xs_gen = lib.Xs_Generator3_2(nd, ns, rho, normalized_len=np.sqrt(ns), seed=rng.integers(100000))
@@ -54,5 +62,12 @@ capacity = np.mean(np.argwhere(tmp))
 print("capacity: ", capacity)
 
 tmp_array = np.array([[bias, kappa, ndR, capacity]])
-with open("data/paraemter_serach/nd200_ns300.txt", "a") as f:
-    np.savetxt(f, tmp_array, fmt=['%.6f', '%.6f', '%.1f', '%.1f'])
+if neuron_choice == "3_2":
+    with open("data/paraemter_serach/nd200_ns300/nd200_ns300.txt", "a") as f:
+        np.savetxt(f, tmp_array, fmt=['%.6f', '%.6f', '%.1f', '%.1f'])
+elif neuron_choice == "10_2":
+    with open("data/paraemter_serach/nd200_ns300/nd200_ns300_neuron10_2.txt", "a") as f:
+        np.savetxt(f, tmp_array, fmt=['%.6f', '%.6f', '%.1f', '%.1f'])
+else:
+    with open("data/paraemter_serach/nd200_ns300/nd200_ns300_neuron_10_2_2.txt", "a") as f:
+        np.savetxt(f, tmp_array, fmt=['%.6f', '%.6f', '%.1f', '%.1f'])

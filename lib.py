@@ -134,7 +134,8 @@ class Neuron4_2(Neuron4):
         f2 = lambda x: jnp.sum(w*x, axis=-1) # for 2d x
         # when input x is 1d, f1 runs faster than f2, because broadcast operation is not needed in f1. 
         overlaps = jax.lax.cond((x.shape)[0]==1, f1, f2, x) # dim=(nd, )
-        high_overlaps, high_overlap_idx = jax.lax.top_k(overlaps, self.n_votes)
+        # high_overlaps, high_overlap_idx = jax.lax.top_k(overlaps, self.n_votes)
+        high_overlaps = overlaps
         high_overlaps = jax.nn.relu(high_overlaps-self.vote_th)
         votes = jnp.sum(high_overlaps)
         # votes = jnp.sum(overlaps)
@@ -321,9 +322,9 @@ class Neuron10(Neuron):
     
 class Neuron10_2(Neuron10):
     """n_votes is the number of dendrites that can contribute to the total votes/evidence that is used for familiarity detection"""
-    def __init__(self, n_synapses, n_dendrites, bias, kappa, ndR, beta, n_votes, seed=42) -> None:
+    def __init__(self, n_synapses, n_dendrites, bias, kappa, ndR, beta, vote_th, seed=42) -> None:
         super().__init__(n_synapses, n_dendrites, bias, kappa, ndR, beta, seed)
-        self.n_votes = n_votes
+        self.vote_th = vote_th
 
     @partial(jax.jit, static_argnums=(0, ))
     def get_votes(self, w, x, latent_var=None):
@@ -333,10 +334,24 @@ class Neuron10_2(Neuron10):
         f2 = lambda x: jnp.sum(w*x, axis=-1) # for 2d x
         # when input x is 1d, f1 runs faster than f2, because broadcast operation is not needed in f1. 
         overlaps = jax.lax.cond((x.shape)[0]==1, f1, f2, x) # dim=(nd, )
-        updated_overlap, updated_idx = jax.lax.top_k(overlaps, self.n_votes)
-        votes = jnp.sum(updated_overlap)
+        # updated_overlap, updated_idx = jax.lax.top_k(overlaps, self.n_votes)
+        # votes = jnp.sum(updated_overlap)
         # votes = jnp.sum(overlaps)
+        high_overlaps = overlaps
+        high_overlaps = jax.nn.relu(high_overlaps-self.vote_th)
+        votes = jnp.sum(high_overlaps)
         return votes
+    
+class Neuron10_2_2(Neuron10_2):
+    @partial(jax.jit, static_argnums=(0, ))
+    def update_fun(self, w, x, latent_var=None):
+        x = jnp.atleast_2d(x)
+        overlaps = jnp.sum(w*x, axis=-1) # dim = (nd, )
+        x_parallel = overlaps/jnp.linalg.norm(w, ord=2, axis=-1) # dim = (nd, )
+        _, updated_idx = jax.lax.top_k(x_parallel, self.ndR)
+        updated_overlap = overlaps[updated_idx]
+        updated_w = w[updated_idx] + jnp.heaviside(self.kappa+self.b-updated_overlap, 0.).reshape((-1, 1))*(x[updated_idx]*(self.kappa+self.b-updated_overlap).reshape((-1, 1)) - self.beta*w[updated_idx])/self.ns # dim = (ndR, ns)
+        return w.at[updated_idx].set(updated_w), latent_var
 
 
 class Xs_Generator():
