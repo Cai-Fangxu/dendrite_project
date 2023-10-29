@@ -476,7 +476,8 @@ class Simulation_Run():
     def init_w(self, key):
         for i  in range(self.initial_steps):
             if i%self.refresh_every == 0:
-                xs0 = self.xs_gen.gen(key, self.refresh_every)
+                subkey, key = jax.random.split(key)
+                xs0 = self.xs_gen.gen(subkey, self.refresh_every)
             self.neuron.w, self.neuron.latent_var = self.neuron_update_fun(self.neuron.w, xs0[i%self.refresh_every], self.neuron.latent_var)
 
     @partial(jax.jit, static_argnums=(0, ))

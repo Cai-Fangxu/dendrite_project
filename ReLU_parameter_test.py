@@ -62,12 +62,14 @@ capacity = np.mean(np.argwhere(tmp))
 print("capacity: ", capacity)
 
 tmp_array = np.array([[bias, kappa, ndR, capacity]])
-if neuron_choice == "3_2":
-    with open("data/paraemter_serach/nd200_ns300/nd200_ns300.txt", "a") as f:
+with open(f"data/paraemter_serach/nd600_ns100/nd600_ns100_neuron_{neuron_choice}.txt", "a") as f:
         np.savetxt(f, tmp_array, fmt=['%.6f', '%.6f', '%.1f', '%.1f'])
-elif neuron_choice == "10_2":
-    with open("data/paraemter_serach/nd200_ns300/nd200_ns300_neuron10_2.txt", "a") as f:
-        np.savetxt(f, tmp_array, fmt=['%.6f', '%.6f', '%.1f', '%.1f'])
-else:
-    with open("data/paraemter_serach/nd200_ns300/nd200_ns300_neuron_10_2_2.txt", "a") as f:
-        np.savetxt(f, tmp_array, fmt=['%.6f', '%.6f', '%.1f', '%.1f'])
+# if neuron_choice == "3_2":
+#     with open("data/paraemter_serach/nd100_ns600/nd100_ns600_neuron3_2.txt", "a") as f:
+#         np.savetxt(f, tmp_array, fmt=['%.6f', '%.6f', '%.1f', '%.1f'])
+# elif neuron_choice == "10_2":
+#     with open("data/paraemter_serach/nd100_ns600/nd100_ns600_neuron10_2.txt", "a") as f:
+#         np.savetxt(f, tmp_array, fmt=['%.6f', '%.6f', '%.1f', '%.1f'])
+# else:
+#     with open("data/paraemter_serach/nd100_ns600/nd100_ns600_neuron_10_2_2.txt", "a") as f:
+#         np.savetxt(f, tmp_array, fmt=['%.6f', '%.6f', '%.1f', '%.1f'])
