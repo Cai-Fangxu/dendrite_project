@@ -8,19 +8,20 @@ import sys
 import os
 
 
-ns=300
-nd=200
+nd=int(float(sys.argv[1]))
+ns=int(float(sys.argv[2]))
 rho = 1
-bias = float(sys.argv[1])
-kappa = float(sys.argv[2])
-ndR = int(float(sys.argv[3]))
+bias = float(sys.argv[3])
+kappa = float(sys.argv[4])
+ndR = int(float(sys.argv[5]))
 n_votes = None
 vote_th = bias
-neuron_choice = sys.argv[4]
-try: 
-    beta = float(sys.argv[5])
-except:
-    beta = -1
+beta = float(sys.argv[6]) # if beta is not needed, set input beta=-1
+neuron_choice = sys.argv[7]
+# try: 
+#     beta = float(sys.argv[7])
+# except:
+#     beta = -1
 
 
 seed = int(sys.argv[-1])
@@ -62,14 +63,9 @@ capacity = np.mean(np.argwhere(tmp))
 print("capacity: ", capacity)
 
 tmp_array = np.array([[bias, kappa, ndR, capacity]])
-with open(f"data/paraemter_serach/nd600_ns100/nd600_ns100_neuron_{neuron_choice}.txt", "a") as f:
+# with open(f"data/paraemter_serach/nd600_ns100/nd600_ns100_neuron_{neuron_choice}.txt", "a") as f:
+        # np.savetxt(f, tmp_array, fmt=['%.6f', '%.6f', '%.1f', '%.1f'])
+
+with open(f"tmp_data/nd{nd}_ns{ns}_neuron{neuron_choice}.txt", "a") as f:
         np.savetxt(f, tmp_array, fmt=['%.6f', '%.6f', '%.1f', '%.1f'])
-# if neuron_choice == "3_2":
-#     with open("data/paraemter_serach/nd100_ns600/nd100_ns600_neuron3_2.txt", "a") as f:
-#         np.savetxt(f, tmp_array, fmt=['%.6f', '%.6f', '%.1f', '%.1f'])
-# elif neuron_choice == "10_2":
-#     with open("data/paraemter_serach/nd100_ns600/nd100_ns600_neuron10_2.txt", "a") as f:
-#         np.savetxt(f, tmp_array, fmt=['%.6f', '%.6f', '%.1f', '%.1f'])
-# else:
-#     with open("data/paraemter_serach/nd100_ns600/nd100_ns600_neuron_10_2_2.txt", "a") as f:
-#         np.savetxt(f, tmp_array, fmt=['%.6f', '%.6f', '%.1f', '%.1f'])
+
