@@ -353,6 +353,14 @@ class Neuron10_2_2(Neuron10_2):
         updated_w = w[updated_idx] + jnp.heaviside(self.kappa+self.b-updated_overlap, 0.).reshape((-1, 1))*(x[updated_idx]*(self.kappa+self.b-updated_overlap).reshape((-1, 1)) - self.beta*w[updated_idx])/self.ns # dim = (ndR, ns)
         return w.at[updated_idx].set(updated_w), latent_var
 
+class Neuron11_2(Neuron10_2):
+    @partial(jax.jit, static_argnums=(0, ))
+    def update_fun(self, w, x, latent_var=None):
+        x = jnp.atleast_2d(x)
+        overlaps = jnp.sum(w*x, axis=-1) # dim = (nd, )
+        updated_overlap, updated_idx = jax.lax.top_k(overlaps, self.ndR)
+        updated_w = w[updated_idx] + jnp.heaviside(self.kappa+self.b-updated_overlap, 0.).reshape((-1, 1))*(x[updated_idx]*(self.kappa+self.b-(1-self.beta/self.ns)*updated_overlap).reshape((-1, 1)) - self.beta*w[updated_idx])/self.ns # dim = (ndR, ns)
+        return w.at[updated_idx].set(updated_w), latent_var
 
 class Xs_Generator():
     def __init__(self, nd, ns, seed=0, *args, **kwargs) -> None:
